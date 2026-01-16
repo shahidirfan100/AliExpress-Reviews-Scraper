@@ -1,0 +1,74 @@
+{
+    "title": "AliExpress Reviews Scraper",
+    "description": "Extract customer reviews from any AliExpress product page. Get ratings, review text, dates, reviewer info, and images.",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "product_url": {
+            "title": "Product URL",
+            "type": "string",
+            "description": "AliExpress product page URL to scrape reviews from.",
+            "editor": "textfield",
+            "prefill": "https://www.aliexpress.com/item/1005006853596517.html"
+        },
+        "results_wanted": {
+            "title": "Results Wanted",
+            "type": "integer",
+            "description": "Maximum number of reviews to collect.",
+            "minimum": 1,
+            "default": 20,
+            "prefill": 20,
+            "editor": "number"
+        },
+        "filter": {
+            "title": "Review Filter",
+            "type": "string",
+            "description": "Filter reviews by type.",
+            "editor": "select",
+            "enum": [
+                "all",
+                "withPictures",
+                "additionalFeedback"
+            ],
+            "enumTitles": [
+                "All Reviews",
+                "With Pictures",
+                "Additional Feedback"
+            ],
+            "default": "all"
+        },
+        "sort": {
+            "title": "Sort By",
+            "type": "string",
+            "description": "Sort order for reviews.",
+            "editor": "select",
+            "enum": [
+                "default",
+                "newest",
+                "rating_desc"
+            ],
+            "enumTitles": [
+                "Default",
+                "Newest First",
+                "Highest Rating"
+            ],
+            "default": "default"
+        },
+        "proxyConfiguration": {
+            "title": "Proxy Configuration",
+            "type": "object",
+            "description": "Proxy settings. Residential proxies recommended for AliExpress.",
+            "editor": "proxy",
+            "default": {
+                "useApifyProxy": true,
+                "apifyProxyGroups": [
+                    "RESIDENTIAL"
+                ]
+            }
+        }
+    },
+    "required": [
+        "product_url"
+    ],
+    "additionalProperties": false
+}

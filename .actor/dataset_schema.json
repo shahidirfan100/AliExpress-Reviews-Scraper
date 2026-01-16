@@ -1,0 +1,53 @@
+{
+    "actorSpecification": 1,
+    "fields": {},
+    "views": {
+        "overview": {
+            "title": "Overview",
+            "transformation": {
+                "fields": [
+                    "review_id",
+                    "reviewer_name",
+                    "rating",
+                    "review_text",
+                    "review_date",
+                    "sku_info",
+                    "country"
+                ]
+            },
+            "display": {
+                "component": "table",
+                "properties": {
+                    "review_id": {
+                        "label": "Review ID",
+                        "format": "text"
+                    },
+                    "reviewer_name": {
+                        "label": "Reviewer",
+                        "format": "text"
+                    },
+                    "rating": {
+                        "label": "Rating",
+                        "format": "number"
+                    },
+                    "review_text": {
+                        "label": "Review",
+                        "format": "text"
+                    },
+                    "review_date": {
+                        "label": "Date",
+                        "format": "text"
+                    },
+                    "sku_info": {
+                        "label": "Product Variant",
+                        "format": "text"
+                    },
+                    "country": {
+                        "label": "Country",
+                        "format": "text"
+                    }
+                }
+            }
+        }
+    }
+}
