@@ -51,9 +51,11 @@ const crawler = new PlaywrightCrawler({
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight * 0.5));
         await page.waitForTimeout(1000);
 
-        // Click View More for reviews
+        // Click View More for reviews - try multiple methods
         log.info('Looking for reviews button...');
-        await page.evaluate(() => {
+
+        // Method 1: Click "View more" button near reviews section
+        let modalOpened = await page.evaluate(() => {
             const btns = document.querySelectorAll('button, span, a');
             for (const btn of btns) {
                 const txt = btn.textContent?.trim().toLowerCase() || '';
@@ -62,14 +64,66 @@ const crawler = new PlaywrightCrawler({
                     for (let i = 0; i < 5 && p; i++) {
                         if (p.textContent?.includes('Helpful') || p.querySelector('[class*="star"]')) {
                             btn.click();
-                            return;
+                            return true;
                         }
                         p = p.parentElement;
                     }
                 }
             }
+            return false;
         });
+
+        if (modalOpened) {
+            log.info('Clicked View More button');
+        } else {
+            log.info('View More button not found, trying alternative methods...');
+
+            // Method 2: Click any "View more" in the page
+            await page.evaluate(() => {
+                const btns = document.querySelectorAll('button, span, a, div');
+                for (const btn of btns) {
+                    const txt = btn.textContent?.trim().toLowerCase() || '';
+                    if (txt === 'view more') {
+                        btn.click();
+                        return;
+                    }
+                }
+            });
+        }
+
         await page.waitForTimeout(3000);
+
+        // Verify modal is open
+        const modalExists = await page.evaluate(() => {
+            return !!document.querySelector('.comet-v2-modal-body') || !!document.querySelector('.comet-modal-body');
+        });
+
+        if (modalExists) {
+            log.info('Reviews modal is open');
+        } else {
+            log.info('Modal not detected, trying to scroll to reviews and click again...');
+
+            // Method 3: Scroll to reviews section and try clicking
+            await page.evaluate(() => {
+                const reviewSection = document.querySelector('#nav-review') ||
+                    document.querySelector('[class*="review"]') ||
+                    document.querySelector('[class*="feedback"]');
+                if (reviewSection) reviewSection.scrollIntoView();
+            });
+            await page.waitForTimeout(1000);
+
+            await page.evaluate(() => {
+                const btns = document.querySelectorAll('button, span, a, div');
+                for (const btn of btns) {
+                    const txt = btn.textContent?.trim().toLowerCase() || '';
+                    if (txt === 'view more' || txt.includes('more review')) {
+                        btn.click();
+                        return;
+                    }
+                }
+            });
+            await page.waitForTimeout(3000);
+        }
 
         const reviews = [];
         let lastHeight = 0;
@@ -78,6 +132,23 @@ const crawler = new PlaywrightCrawler({
 
         // Extract and scroll loop - pure infinite scroll, no pagination buttons needed
         for (let round = 0; round < 150 && saved < RESULTS_WANTED; round++) {
+            // Debug: Log number of boxes found on first round
+            if (round === 0) {
+                const debugInfo = await page.evaluate(() => {
+                    const modalBody = document.querySelector('.comet-v2-modal-body');
+                    const boxes = document.querySelectorAll('div[class^="list--itemBox"]');
+                    const firstBox = boxes[0];
+                    return {
+                        modalExists: !!modalBody,
+                        boxCount: boxes.length,
+                        firstBoxClass: firstBox?.className || 'none',
+                        firstBoxText: firstBox?.textContent?.substring(0, 100) || 'none',
+                        pageReviewCount: document.querySelectorAll('[class*="review"]').length
+                    };
+                });
+                log.info(`Debug: modalExists=${debugInfo.modalExists}, boxCount=${debugInfo.boxCount}, firstBoxClass=${debugInfo.firstBoxClass}, pageReviewElems=${debugInfo.pageReviewCount}`);
+            }
+
             // Extract reviews using resilient selector
             const found = await page.evaluate(() => {
                 const items = [];
@@ -85,20 +156,22 @@ const crawler = new PlaywrightCrawler({
                 const boxes = document.querySelectorAll('div[class^="list--itemBox"]');
 
                 boxes.forEach(box => {
-                    // Try multiple selectors for review text
-                    const textEl = box.querySelector('.list--itemReview--d9Z9Z5Z') ||
-                        box.querySelector('[class*="review-content"]') ||
-                        box.querySelector('[class*="reviewContent"]') ||
-                        box.querySelector('[class*="feedback-content"]');
+                    // Use resilient selectors - partial attribute match for class prefix
+                    const textEl = box.querySelector('[class^="list--itemReview"]') ||
+                        box.querySelector('[class*="itemReview"]') ||
+                        box.querySelector('[class*="review-content"]');
                     const text = textEl?.textContent?.trim();
                     if (!text || text.length < 10) return;
 
-                    const infoEl = box.querySelector('.list--itemInfo--VEcgSFh') ||
-                        box.querySelector('[class*="user-info"]') ||
-                        box.querySelector('[class*="reviewer"]');
+                    const infoEl = box.querySelector('[class^="list--itemInfo"]') ||
+                        box.querySelector('[class*="itemInfo"]');
                     const parts = (infoEl?.textContent || '').split('|').map(s => s.trim());
-                    const stars = box.querySelectorAll('.comet-icon-starreviewfilled, [class*="star-filled"], [class*="starFilled"]').length;
-                    const skuEl = box.querySelector('.list--itemSku--idEQSGC') || box.querySelector('[class*="sku"]');
+
+                    const stars = box.querySelectorAll('.comet-icon-starreviewfilled, [class*="star"][class*="filled"], svg[class*="star"]').length;
+
+                    const skuEl = box.querySelector('[class^="list--itemSku"]') ||
+                        box.querySelector('[class*="itemSku"]') ||
+                        box.querySelector('[class*="sku"]');
                     const imgs = [...box.querySelectorAll('img')].map(i => i.src).filter(s => s?.includes('alicdn'));
 
                     items.push({
