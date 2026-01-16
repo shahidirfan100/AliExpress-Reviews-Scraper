@@ -1,4 +1,4 @@
-// AliExpress Reviews Scraper - Proper modal scrolling with wait for content
+// AliExpress Reviews Scraper - Correct modal scroll based on research
 import { PlaywrightCrawler, Dataset } from 'crawlee';
 import { Actor, log } from 'apify';
 
@@ -63,67 +63,77 @@ const crawler = new PlaywrightCrawler({
         },
     ],
     async requestHandler({ page }) {
-        log.info('Loading product page...');
+        log.info('Loading page...');
         await page.waitForLoadState('domcontentloaded');
         await page.waitForTimeout(2000);
 
         // Scroll to reviews section
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight * 0.5));
-        await page.waitForTimeout(1500);
+        await page.waitForTimeout(1000);
 
-        // Click "View more" to open reviews modal
-        log.info('Looking for View More button...');
+        // Click "View more" or "View" button to open reviews modal
+        log.info('Opening reviews modal...');
         const clicked = await page.evaluate(() => {
-            const elements = [...document.querySelectorAll('button, a, span, div')];
-            for (const el of elements) {
-                const txt = el.textContent?.toLowerCase() || '';
-                if ((txt.includes('view') && txt.includes('more')) ||
-                    (txt.includes('see') && txt.includes('all')) ||
-                    txt.match(/view\s+\d+/)) {
-                    el.scrollIntoView({ block: 'center' });
-                    el.click();
-                    return true;
+            const buttons = [...document.querySelectorAll('button, a, span, div')];
+            for (const btn of buttons) {
+                const txt = btn.textContent?.trim().toLowerCase() || '';
+                if ((txt === 'view more') ||
+                    (txt.includes('view') && txt.includes('more')) ||
+                    (txt.startsWith('view') && txt.length < 20)) {
+                    btn.scrollIntoView({ block: 'center' });
+                    btn.click();
+                    return txt;
                 }
             }
-            return false;
+            return null;
         });
 
         if (clicked) {
-            log.info('Clicked View More, waiting for modal...');
+            log.info(`Clicked: "${clicked}". Waiting for modal...`);
             await page.waitForTimeout(3000);
-        } else {
-            log.info('No View More button found, scraping from page');
         }
 
         const reviews = [];
         let lastCount = 0;
-        let stableCount = 0;
+        let noNewRounds = 0;
 
-        // Main extraction loop with proper scrolling
-        for (let iteration = 0; iteration < 100 && saved < RESULTS_WANTED; iteration++) {
-            // Extract all visible reviews
+        // Scroll and extract loop - scroll to bottom of .comet-v2-modal-body
+        for (let i = 0; i < 60 && saved < RESULTS_WANTED; i++) {
+            // Extract reviews using confirmed selectors
             const pageReviews = await page.evaluate(() => {
                 const items = [];
-                // Try multiple selectors
-                const selectors = '.list--itemBox--je_KNzb, [class*="feedback-item"], [class*="review-item"]';
-                const boxes = document.querySelectorAll(selectors);
+                // Confirmed selector from research
+                const boxes = document.querySelectorAll('.list--itemBox--je_KNzb');
 
                 for (const box of boxes) {
-                    const textEl = box.querySelector('.list--itemReview--d9Z9Z5Z, [class*="review-content"], [class*="buyer-feedback"]');
+                    // Review text - confirmed selector
+                    const textEl = box.querySelector('.list--itemReview--d9Z9Z5Z');
                     const text = textEl?.textContent?.trim();
                     if (!text || text.length < 5) continue;
 
-                    const infoEl = box.querySelector('.list--itemInfo--VEcgSFh, [class*="user-info"]');
+                    // Reviewer info
+                    const infoEl = box.querySelector('.list--itemInfo--VEcgSFh');
                     const infoParts = (infoEl?.textContent || '').split('|').map(s => s.trim());
-                    const stars = box.querySelectorAll('.comet-icon-starreviewfilled').length;
+
+                    // Rating - stars box
+                    const starsBox = box.querySelector('.stars--box--WrrveRu, [class*="stars--box"]');
+                    let rating = 5;
+                    if (starsBox) {
+                        const filledStars = starsBox.querySelectorAll('.comet-icon-starreviewfilled, [class*="star"][class*="full"]');
+                        if (filledStars.length > 0) rating = filledStars.length;
+                    }
+
+                    // SKU info
                     const skuEl = box.querySelector('.list--itemSku--idEQSGC, [class*="sku"]');
+
+                    // Images
                     const imgs = [...box.querySelectorAll('img')].map(i => i.src).filter(s => s && s.includes('alicdn'));
 
                     items.push({
                         text,
                         name: infoParts[0] || 'Anonymous',
                         date: infoParts[1] || null,
-                        rating: stars || 5,
+                        rating,
                         sku: skuEl?.textContent?.trim() || null,
                         images: imgs.map(u => u.replace(/_\.avif$/i, '').replace(/_\.webp$/i, '')),
                     });
@@ -131,7 +141,7 @@ const crawler = new PlaywrightCrawler({
                 return items;
             });
 
-            // Add new unique reviews
+            // Add unique reviews
             for (const r of pageReviews) {
                 if (saved >= RESULTS_WANTED) break;
                 const key = r.text.substring(0, 80);
@@ -154,88 +164,46 @@ const crawler = new PlaywrightCrawler({
                 }
             }
 
-            // Log progress every 5 iterations
-            if (iteration % 5 === 0) {
-                log.info(`Iteration ${iteration}: Found ${pageReviews.length} on page, ${saved}/${RESULTS_WANTED} unique saved`);
-            }
+            log.info(`Round ${i + 1}: ${pageReviews.length} on page, ${saved}/${RESULTS_WANTED} saved`);
 
-            // Check if we're done
-            if (saved >= RESULTS_WANTED) {
-                log.info('Target reached!');
-                break;
-            }
+            if (saved >= RESULTS_WANTED) break;
 
-            // Check if count is stable (no new reviews loading)
+            // Check if we're getting new reviews
             if (saved === lastCount) {
-                stableCount++;
-                if (stableCount >= 10) {
-                    log.info('No new reviews after 10 scroll attempts. All available reviews collected.');
+                noNewRounds++;
+                if (noNewRounds >= 5) {
+                    log.info('No new reviews after 5 scrolls. Done.');
                     break;
                 }
             } else {
-                stableCount = 0;
+                noNewRounds = 0;
                 lastCount = saved;
             }
 
-            // Save in batches
+            // Save in batches of 10
             if (reviews.length >= 10) {
                 await Dataset.pushData(reviews.splice(0, 10));
-                log.info(`Batch saved. Total: ${saved}/${RESULTS_WANTED}`);
+                log.info(`Batch saved.`);
             }
 
-            // SCROLL: Try modal first, then page, with different methods
-            const scrollInfo = await page.evaluate(() => {
-                // Method 1: Try known modal containers
-                const modalContainers = [
-                    '.comet-v2-modal-body',
-                    '.v3--modal-content--S7_r_eW',
-                    '[class*="modal-body"]',
-                    '[class*="modal-content"]',
-                    '[class*="dialog-body"]',
-                ];
-
-                for (const sel of modalContainers) {
-                    const modal = document.querySelector(sel);
-                    if (modal && modal.scrollHeight > modal.clientHeight + 10) {
-                        const prevTop = modal.scrollTop;
-                        modal.scrollTop = modal.scrollTop + 300;
-                        if (modal.scrollTop > prevTop) {
-                            return { method: 'modal', selector: sel, scrolled: true };
-                        }
-                    }
+            // SCROLL: Target .comet-v2-modal-body specifically (confirmed from research)
+            await page.evaluate(() => {
+                const modal = document.querySelector('.comet-v2-modal-body');
+                if (modal) {
+                    modal.scrollTop = modal.scrollHeight; // Scroll to absolute bottom
                 }
-
-                // Method 2: Find any deep scrollable element inside modal
-                const modalRoot = document.querySelector('[class*="modal"]');
-                if (modalRoot) {
-                    const allElements = modalRoot.querySelectorAll('*');
-                    for (const el of allElements) {
-                        if (el.scrollHeight > el.clientHeight + 50 && el.scrollHeight > 200) {
-                            const prevTop = el.scrollTop;
-                            el.scrollTop = el.scrollTop + 300;
-                            if (el.scrollTop > prevTop) {
-                                return { method: 'modal-child', className: el.className.substring(0, 50), scrolled: true };
-                            }
-                        }
-                    }
-                }
-
-                // Method 3: Scroll the main page
-                const prevScroll = window.scrollY;
-                window.scrollBy(0, 400);
-                return { method: 'window', scrolled: window.scrollY > prevScroll };
             });
 
-            // Wait for new content to load after scroll
-            await page.waitForTimeout(800);
+            // Wait for new reviews to load (infinite scroll)
+            await page.waitForTimeout(1500);
         }
 
-        // Save remaining reviews
+        // Save remaining
         if (reviews.length > 0) {
             await Dataset.pushData(reviews);
         }
 
-        log.info(`Completed. Total saved: ${saved}`);
+        log.info(`Complete. Total: ${saved}`);
     },
 
     failedRequestHandler({ request }, error) {
@@ -244,5 +212,5 @@ const crawler = new PlaywrightCrawler({
 });
 
 await crawler.run([{ url: product_url }]);
-log.info(`Scraping complete. Reviews saved: ${saved}`);
+log.info(`Done. Reviews: ${saved}`);
 await Actor.exit();
