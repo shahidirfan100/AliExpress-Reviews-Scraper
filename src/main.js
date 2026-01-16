@@ -1,4 +1,4 @@
-// AliExpress Reviews Scraper - Correct modal scroll based on research
+// AliExpress Reviews Scraper - Fixed button targeting
 import { PlaywrightCrawler, Dataset } from 'crawlee';
 import { Actor, log } from 'apify';
 
@@ -69,65 +69,89 @@ const crawler = new PlaywrightCrawler({
 
         // Scroll to reviews section
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight * 0.5));
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(1500);
 
-        // Click "View more" or "View" button to open reviews modal
-        log.info('Opening reviews modal...');
+        // Find and click the ACTUAL "View more" button (small button element, not large text blocks)
+        log.info('Finding View more button...');
         const clicked = await page.evaluate(() => {
-            const buttons = [...document.querySelectorAll('button, a, span, div')];
-            for (const btn of buttons) {
+            // Look specifically for short buttons/links with "view more" text
+            const candidates = document.querySelectorAll('button, a, span[role="button"], div[role="button"]');
+
+            for (const btn of candidates) {
                 const txt = btn.textContent?.trim().toLowerCase() || '';
-                if ((txt === 'view more') ||
-                    (txt.includes('view') && txt.includes('more')) ||
-                    (txt.startsWith('view') && txt.length < 20)) {
+                // Must be SHORT text (actual button) and contain "view more"
+                if (txt.length < 30 && txt.includes('view') && txt.includes('more')) {
                     btn.scrollIntoView({ block: 'center' });
                     btn.click();
-                    return txt;
+                    return { found: true, text: txt };
                 }
             }
-            return null;
+
+            // Alternative: Try using Playwright's built-in text locator approach via DOM
+            const allElements = document.querySelectorAll('*');
+            for (const el of allElements) {
+                const txt = el.textContent?.trim().toLowerCase() || '';
+                // Only match elements where the DIRECT text is "view more" (not nested text)
+                if (el.childNodes.length <= 3) {
+                    let directText = '';
+                    for (const node of el.childNodes) {
+                        if (node.nodeType === Node.TEXT_NODE) {
+                            directText += node.textContent;
+                        }
+                    }
+                    directText = directText.trim().toLowerCase();
+                    if (directText === 'view more' || directText === 'view all') {
+                        el.scrollIntoView({ block: 'center' });
+                        el.click();
+                        return { found: true, text: directText };
+                    }
+                }
+            }
+
+            return { found: false };
         });
 
-        if (clicked) {
-            log.info(`Clicked: "${clicked}". Waiting for modal...`);
+        if (clicked.found) {
+            log.info(`Clicked: "${clicked.text}". Waiting for modal...`);
             await page.waitForTimeout(3000);
+        } else {
+            log.warning('Could not find View more button');
         }
+
+        // Check if modal opened
+        const modalExists = await page.evaluate(() => {
+            return !!document.querySelector('.comet-v2-modal-body');
+        });
+        log.info(`Modal opened: ${modalExists}`);
 
         const reviews = [];
         let lastCount = 0;
         let noNewRounds = 0;
 
-        // Scroll and extract loop - scroll to bottom of .comet-v2-modal-body
+        // Scroll and extract loop
         for (let i = 0; i < 60 && saved < RESULTS_WANTED; i++) {
-            // Extract reviews using confirmed selectors
+            // Extract reviews
             const pageReviews = await page.evaluate(() => {
                 const items = [];
-                // Confirmed selector from research
                 const boxes = document.querySelectorAll('.list--itemBox--je_KNzb');
 
                 for (const box of boxes) {
-                    // Review text - confirmed selector
                     const textEl = box.querySelector('.list--itemReview--d9Z9Z5Z');
                     const text = textEl?.textContent?.trim();
                     if (!text || text.length < 5) continue;
 
-                    // Reviewer info
                     const infoEl = box.querySelector('.list--itemInfo--VEcgSFh');
                     const infoParts = (infoEl?.textContent || '').split('|').map(s => s.trim());
 
-                    // Rating - stars box
                     const starsBox = box.querySelector('.stars--box--WrrveRu, [class*="stars--box"]');
                     let rating = 5;
                     if (starsBox) {
-                        const filledStars = starsBox.querySelectorAll('.comet-icon-starreviewfilled, [class*="star"][class*="full"]');
-                        if (filledStars.length > 0) rating = filledStars.length;
+                        const filled = starsBox.querySelectorAll('.comet-icon-starreviewfilled');
+                        if (filled.length > 0) rating = filled.length;
                     }
 
-                    // SKU info
-                    const skuEl = box.querySelector('.list--itemSku--idEQSGC, [class*="sku"]');
-
-                    // Images
-                    const imgs = [...box.querySelectorAll('img')].map(i => i.src).filter(s => s && s.includes('alicdn'));
+                    const skuEl = box.querySelector('.list--itemSku--idEQSGC');
+                    const imgs = [...box.querySelectorAll('img')].map(i => i.src).filter(s => s?.includes('alicdn'));
 
                     items.push({
                         text,
@@ -164,15 +188,14 @@ const crawler = new PlaywrightCrawler({
                 }
             }
 
-            log.info(`Round ${i + 1}: ${pageReviews.length} on page, ${saved}/${RESULTS_WANTED} saved`);
+            log.info(`Round ${i + 1}: ${pageReviews.length} visible, ${saved}/${RESULTS_WANTED} unique`);
 
             if (saved >= RESULTS_WANTED) break;
 
-            // Check if we're getting new reviews
             if (saved === lastCount) {
                 noNewRounds++;
-                if (noNewRounds >= 5) {
-                    log.info('No new reviews after 5 scrolls. Done.');
+                if (noNewRounds >= 8) {
+                    log.info('No new reviews after 8 scrolls. Done.');
                     break;
                 }
             } else {
@@ -180,22 +203,20 @@ const crawler = new PlaywrightCrawler({
                 lastCount = saved;
             }
 
-            // Save in batches of 10
+            // Save batches
             if (reviews.length >= 10) {
                 await Dataset.pushData(reviews.splice(0, 10));
-                log.info(`Batch saved.`);
+                log.info('Batch saved.');
             }
 
-            // SCROLL: Target .comet-v2-modal-body specifically (confirmed from research)
+            // Scroll modal to bottom
             await page.evaluate(() => {
                 const modal = document.querySelector('.comet-v2-modal-body');
                 if (modal) {
-                    modal.scrollTop = modal.scrollHeight; // Scroll to absolute bottom
+                    modal.scrollTop = modal.scrollHeight;
                 }
             });
-
-            // Wait for new reviews to load (infinite scroll)
-            await page.waitForTimeout(1500);
+            await page.waitForTimeout(1200);
         }
 
         // Save remaining
