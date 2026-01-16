@@ -1,4 +1,4 @@
-// AliExpress Reviews Scraper - Fixed button targeting
+// AliExpress Reviews Scraper - Robust button targeting + dual modal support
 import { PlaywrightCrawler, Dataset } from 'crawlee';
 import { Actor, log } from 'apify';
 
@@ -71,86 +71,116 @@ const crawler = new PlaywrightCrawler({
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight * 0.5));
         await page.waitForTimeout(1500);
 
-        // Find and click the ACTUAL "View more" button (small button element, not large text blocks)
-        log.info('Finding View more button...');
+        // Find and click the CORRECT "View more" button for REVIEWS
+        log.info('Finding reviews View more button...');
         const clicked = await page.evaluate(() => {
-            // Look specifically for short buttons/links with "view more" text
-            const candidates = document.querySelectorAll('button, a, span[role="button"], div[role="button"]');
+            // Strategy 1: Find "View more" button near review section (data-anchor="review")
+            const reviewSection = document.querySelector('[data-anchor="review"]');
+            if (reviewSection) {
+                const btns = reviewSection.querySelectorAll('button, span, div, a');
+                for (const btn of btns) {
+                    const txt = btn.textContent?.trim().toLowerCase();
+                    if (txt && txt.length < 30 && txt.includes('view') && txt.includes('more')) {
+                        btn.scrollIntoView({ block: 'center' });
+                        btn.click();
+                        return { method: 'review-section', text: txt };
+                    }
+                }
+            }
 
-            for (const btn of candidates) {
-                const txt = btn.textContent?.trim().toLowerCase() || '';
-                // Must be SHORT text (actual button) and contain "view more"
-                if (txt.length < 30 && txt.includes('view') && txt.includes('more')) {
+            // Strategy 2: Find "View more" button that appears AFTER review content (look for "Helpful" nearby)
+            const allButtons = document.querySelectorAll('button, span[role="button"], div[role="button"]');
+            for (const btn of allButtons) {
+                const txt = btn.textContent?.trim().toLowerCase();
+                if (txt === 'view more' || (txt && txt.length < 20 && txt.includes('view') && txt.includes('more'))) {
+                    // Check if this button is near review content (parent contains "Helpful" or star ratings)
+                    let parent = btn.parentElement;
+                    for (let i = 0; i < 5 && parent; i++) {
+                        if (parent.textContent?.includes('Helpful') ||
+                            parent.querySelector('[class*="star"]') ||
+                            parent.querySelector('[class*="rating"]')) {
+                            btn.scrollIntoView({ block: 'center' });
+                            btn.click();
+                            return { method: 'near-helpful', text: txt };
+                        }
+                        parent = parent.parentElement;
+                    }
+                }
+            }
+
+            // Strategy 3: Find button with specific review-related class
+            const reviewBtns = document.querySelectorAll('.v3--btn--KaygomA, [class*="review"] button');
+            for (const btn of reviewBtns) {
+                const txt = btn.textContent?.trim().toLowerCase();
+                if (txt && txt.includes('view') && txt.includes('more')) {
                     btn.scrollIntoView({ block: 'center' });
                     btn.click();
-                    return { found: true, text: txt };
+                    return { method: 'review-class', text: txt };
                 }
             }
 
-            // Alternative: Try using Playwright's built-in text locator approach via DOM
-            const allElements = document.querySelectorAll('*');
-            for (const el of allElements) {
+            // Strategy 4: Last resort - click first short "view more" button after scrolling past half the page
+            const buttons = Array.from(document.querySelectorAll('button, span, a')).filter(el => {
                 const txt = el.textContent?.trim().toLowerCase() || '';
-                // Only match elements where the DIRECT text is "view more" (not nested text)
-                if (el.childNodes.length <= 3) {
-                    let directText = '';
-                    for (const node of el.childNodes) {
-                        if (node.nodeType === Node.TEXT_NODE) {
-                            directText += node.textContent;
-                        }
-                    }
-                    directText = directText.trim().toLowerCase();
-                    if (directText === 'view more' || directText === 'view all') {
-                        el.scrollIntoView({ block: 'center' });
-                        el.click();
-                        return { found: true, text: directText };
-                    }
+                const rect = el.getBoundingClientRect();
+                return txt === 'view more' && rect.top > 0 && rect.height > 0;
+            });
+
+            if (buttons.length > 0) {
+                // Prefer button with height < 50px (likely a text button, not a card)
+                const smallBtn = buttons.find(b => b.getBoundingClientRect().height < 50);
+                if (smallBtn) {
+                    smallBtn.scrollIntoView({ block: 'center' });
+                    smallBtn.click();
+                    return { method: 'last-resort', text: 'view more' };
                 }
             }
 
-            return { found: false };
+            return null;
         });
 
-        if (clicked.found) {
-            log.info(`Clicked: "${clicked.text}". Waiting for modal...`);
+        if (clicked) {
+            log.info(`Clicked: "${clicked.text}" via ${clicked.method}. Waiting for modal...`);
             await page.waitForTimeout(3000);
         } else {
-            log.warning('Could not find View more button');
+            log.warning('Could not find reviews View more button');
         }
 
-        // Check if modal opened
-        const modalExists = await page.evaluate(() => {
-            return !!document.querySelector('.comet-v2-modal-body');
+        // Check for modal (support both class names)
+        const modalInfo = await page.evaluate(() => {
+            const modal = document.querySelector('.comet-v2-modal-body') || document.querySelector('.comet-modal-body');
+            return modal ? { found: true, className: modal.className } : { found: false };
         });
-        log.info(`Modal opened: ${modalExists}`);
+        log.info(`Modal: ${modalInfo.found ? modalInfo.className : 'not found'}`);
 
         const reviews = [];
         let lastCount = 0;
         let noNewRounds = 0;
 
-        // Scroll and extract loop
-        for (let i = 0; i < 60 && saved < RESULTS_WANTED; i++) {
-            // Extract reviews
+        // Main extraction loop
+        for (let i = 0; i < 80 && saved < RESULTS_WANTED; i++) {
+            // Extract reviews (try multiple selectors)
             const pageReviews = await page.evaluate(() => {
                 const items = [];
-                const boxes = document.querySelectorAll('.list--itemBox--je_KNzb');
+                // Try both common selectors
+                const boxes = document.querySelectorAll('.list--itemBox--je_KNzb, [class*="review-item"], [class*="feedback-list"] > div');
 
                 for (const box of boxes) {
-                    const textEl = box.querySelector('.list--itemReview--d9Z9Z5Z');
+                    const textEl = box.querySelector('.list--itemReview--d9Z9Z5Z, [class*="review-content"], [class*="feedback"]');
                     const text = textEl?.textContent?.trim();
-                    if (!text || text.length < 5) continue;
+                    if (!text || text.length < 10) continue;
 
-                    const infoEl = box.querySelector('.list--itemInfo--VEcgSFh');
+                    const infoEl = box.querySelector('.list--itemInfo--VEcgSFh, [class*="user-info"]');
                     const infoParts = (infoEl?.textContent || '').split('|').map(s => s.trim());
 
-                    const starsBox = box.querySelector('.stars--box--WrrveRu, [class*="stars--box"]');
                     let rating = 5;
+                    const starsBox = box.querySelector('[class*="stars--box"], [class*="rating"]');
                     if (starsBox) {
-                        const filled = starsBox.querySelectorAll('.comet-icon-starreviewfilled');
+                        const filled = starsBox.querySelectorAll('.comet-icon-starreviewfilled, [class*="star"][class*="full"]');
                         if (filled.length > 0) rating = filled.length;
                     }
 
-                    const skuEl = box.querySelector('.list--itemSku--idEQSGC');
+                    const skuEl = box.querySelector('.list--itemSku--idEQSGC, [class*="sku"]');
                     const imgs = [...box.querySelectorAll('img')].map(i => i.src).filter(s => s?.includes('alicdn'));
 
                     items.push({
@@ -188,14 +218,16 @@ const crawler = new PlaywrightCrawler({
                 }
             }
 
-            log.info(`Round ${i + 1}: ${pageReviews.length} visible, ${saved}/${RESULTS_WANTED} unique`);
+            if (i % 5 === 0) {
+                log.info(`Round ${i + 1}: ${pageReviews.length} visible, ${saved}/${RESULTS_WANTED} unique`);
+            }
 
             if (saved >= RESULTS_WANTED) break;
 
             if (saved === lastCount) {
                 noNewRounds++;
-                if (noNewRounds >= 8) {
-                    log.info('No new reviews after 8 scrolls. Done.');
+                if (noNewRounds >= 10) {
+                    log.info('No new reviews after 10 scrolls. All collected.');
                     break;
                 }
             } else {
@@ -209,14 +241,14 @@ const crawler = new PlaywrightCrawler({
                 log.info('Batch saved.');
             }
 
-            // Scroll modal to bottom
+            // Scroll modal (support both class names)
             await page.evaluate(() => {
-                const modal = document.querySelector('.comet-v2-modal-body');
+                const modal = document.querySelector('.comet-v2-modal-body') || document.querySelector('.comet-modal-body');
                 if (modal) {
-                    modal.scrollTop = modal.scrollHeight;
+                    modal.scrollBy(0, 1000);
                 }
             });
-            await page.waitForTimeout(1200);
+            await page.waitForTimeout(1500);
         }
 
         // Save remaining
