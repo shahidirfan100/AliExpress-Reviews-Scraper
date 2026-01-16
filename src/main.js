@@ -1,4 +1,4 @@
-// AliExpress Reviews Scraper - Wait for scrollHeight changes
+// AliExpress Reviews Scraper - Simplified and robust
 import { PlaywrightCrawler, Dataset } from 'crawlee';
 import { Actor, log } from 'apify';
 
@@ -24,7 +24,7 @@ if (!productId) {
     await Actor.exit({ exitCode: 1 });
 }
 
-log.info(`Scraping reviews for product: ${productId}, wanted: ${RESULTS_WANTED}`);
+log.info(`Starting: product ${productId}, wanted ${RESULTS_WANTED}`);
 
 const proxyConfiguration = await Actor.createProxyConfiguration(proxyConfig || {
     useApifyProxy: true,
@@ -38,119 +38,73 @@ const crawler = new PlaywrightCrawler({
     proxyConfiguration,
     maxRequestRetries: 3,
     maxConcurrency: 1,
-    requestHandlerTimeoutSecs: 300,
-    navigationTimeoutSecs: 60,
+    requestHandlerTimeoutSecs: 180,
+    navigationTimeoutSecs: 45,
     browserPoolOptions: {
         useFingerprints: true,
-        fingerprintOptions: {
-            fingerprintGeneratorOptions: {
-                browsers: ['firefox'],
-                operatingSystems: ['windows'],
-                devices: ['desktop'],
-            },
-        },
     },
-    preNavigationHooks: [
-        async ({ page }) => {
-            await page.route('**/*', (route) => {
-                const type = route.request().resourceType();
-                if (['font', 'media'].includes(type)) return route.abort();
-                return route.continue();
-            });
-            await page.addInitScript(() => {
-                Object.defineProperty(navigator, 'webdriver', { get: () => false });
-            });
-        },
-    ],
-    async requestHandler({ page }) {
-        log.info('Loading...');
-        await page.waitForLoadState('domcontentloaded');
+    async requestHandler({ page, request }) {
+        log.info(`Page loaded: ${request.url}`);
         await page.waitForTimeout(2000);
 
+        // Scroll to reviews
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight * 0.5));
-        await page.waitForTimeout(1500);
+        await page.waitForTimeout(1000);
 
-        log.info('Finding reviews button...');
-        const clicked = await page.evaluate(() => {
-            const reviewSection = document.querySelector('[data-anchor="review"]');
-            if (reviewSection) {
-                const btns = reviewSection.querySelectorAll('button, span, div, a');
-                for (const btn of btns) {
-                    const txt = btn.textContent?.trim().toLowerCase();
-                    if (txt && txt.length < 30 && txt.includes('view') && txt.includes('more')) {
-                        btn.scrollIntoView({ block: 'center' });
-                        btn.click();
-                        return true;
-                    }
-                }
-            }
-
-            const allButtons = document.querySelectorAll('button, span, a');
-            for (const btn of allButtons) {
-                const txt = btn.textContent?.trim().toLowerCase();
-                if (txt === 'view more' || (txt && txt.length < 20 && txt.includes('view') && txt.includes('more'))) {
-                    let parent = btn.parentElement;
-                    for (let i = 0; i < 5 && parent; i++) {
-                        if (parent.textContent?.includes('Helpful') || parent.querySelector('[class*="star"]')) {
-                            btn.scrollIntoView({ block: 'center' });
+        // Click View More for reviews
+        log.info('Looking for reviews button...');
+        await page.evaluate(() => {
+            const btns = document.querySelectorAll('button, span, a');
+            for (const btn of btns) {
+                const txt = btn.textContent?.trim().toLowerCase() || '';
+                if (txt === 'view more' || (txt.length < 20 && txt.includes('view') && txt.includes('more'))) {
+                    let p = btn.parentElement;
+                    for (let i = 0; i < 5 && p; i++) {
+                        if (p.textContent?.includes('Helpful') || p.querySelector('[class*="star"]')) {
                             btn.click();
-                            return true;
+                            return;
                         }
-                        parent = parent.parentElement;
+                        p = p.parentElement;
                     }
                 }
             }
-            return false;
         });
-
-        if (clicked) {
-            log.info('Button clicked. Waiting...');
-            await page.waitForTimeout(3000);
-        }
+        await page.waitForTimeout(3000);
 
         const reviews = [];
         let lastHeight = 0;
-        let noChangeRounds = 0;
+        let stableRounds = 0;
 
-        // Main loop - wait for content to load by monitoring scrollHeight
-        for (let i = 0; i < 100 && saved < RESULTS_WANTED; i++) {
-            // Extract reviews
-            const pageReviews = await page.evaluate(() => {
+        // Extract and scroll loop
+        for (let round = 0; round < 80 && saved < RESULTS_WANTED; round++) {
+            // Extract
+            const found = await page.evaluate(() => {
                 const items = [];
-                const boxes = document.querySelectorAll('.list--itemBox--je_KNzb, [class*="review-item"]');
-
-                for (const box of boxes) {
-                    const textEl = box.querySelector('.list--itemReview--d9Z9Z5Z, [class*="review-content"]');
+                document.querySelectorAll('.list--itemBox--je_KNzb').forEach(box => {
+                    const textEl = box.querySelector('.list--itemReview--d9Z9Z5Z');
                     const text = textEl?.textContent?.trim();
-                    if (!text || text.length < 10) continue;
+                    if (!text || text.length < 10) return;
 
                     const infoEl = box.querySelector('.list--itemInfo--VEcgSFh');
-                    const infoParts = (infoEl?.textContent || '').split('|').map(s => s.trim());
-
-                    let rating = 5;
-                    const starsBox = box.querySelector('[class*="stars--box"]');
-                    if (starsBox) {
-                        const filled = starsBox.querySelectorAll('.comet-icon-starreviewfilled');
-                        if (filled.length > 0) rating = filled.length;
-                    }
-
+                    const parts = (infoEl?.textContent || '').split('|').map(s => s.trim());
+                    const stars = box.querySelectorAll('.comet-icon-starreviewfilled').length;
                     const skuEl = box.querySelector('.list--itemSku--idEQSGC');
                     const imgs = [...box.querySelectorAll('img')].map(i => i.src).filter(s => s?.includes('alicdn'));
 
                     items.push({
                         text,
-                        name: infoParts[0] || 'Anonymous',
-                        date: infoParts[1] || null,
-                        rating,
+                        name: parts[0] || 'Anonymous',
+                        date: parts[1] || null,
+                        rating: stars || 5,
                         sku: skuEl?.textContent?.trim() || null,
                         images: imgs.map(u => u.replace(/_\.avif$/i, '').replace(/_\.webp$/i, '')),
                     });
-                }
+                });
                 return items;
             });
 
             // Add unique
-            for (const r of pageReviews) {
+            for (const r of found) {
                 if (saved >= RESULTS_WANTED) break;
                 const key = r.text.substring(0, 80);
                 if (!seenTexts.has(key)) {
@@ -172,58 +126,42 @@ const crawler = new PlaywrightCrawler({
                 }
             }
 
-            if (i % 5 === 0) {
-                log.info(`Round ${i + 1}: ${pageReviews.length} on page, ${saved}/${RESULTS_WANTED} saved`);
-            }
-
+            if (round % 5 === 0) log.info(`Round ${round}: ${found.length} visible, ${saved}/${RESULTS_WANTED} saved`);
             if (saved >= RESULTS_WANTED) break;
 
-            // Check scrollHeight to see if content is loading
-            const scrollInfo = await page.evaluate(() => {
-                const modal = document.querySelector('.comet-v2-modal-body') || document.querySelector('.comet-modal-body');
-                if (modal) {
-                    return { height: modal.scrollHeight, found: true };
-                }
-                return { height: 0, found: false };
+            // Check scroll height
+            const height = await page.evaluate(() => {
+                const m = document.querySelector('.comet-v2-modal-body') || document.querySelector('.comet-modal-body');
+                return m ? m.scrollHeight : 0;
             });
 
-            if (scrollInfo.found) {
-                if (scrollInfo.height === lastHeight) {
-                    noChangeRounds++;
-                } else {
-                    noChangeRounds = 0;
-                    lastHeight = scrollInfo.height;
+            if (height === lastHeight) {
+                stableRounds++;
+                if (stableRounds >= 12) {
+                    log.info('No new content. Done.');
+                    break;
                 }
+            } else {
+                stableRounds = 0;
+                lastHeight = height;
             }
 
-            if (noChangeRounds >= 15) {
-                log.info('No scrollHeight change for 15 rounds. Done.');
-                break;
-            }
-
-            // Save batches
+            // Save batch
             if (reviews.length >= 10) {
                 await Dataset.pushData(reviews.splice(0, 10));
                 log.info('Batch saved.');
             }
 
-            // Scroll to bottom (like browser research)
+            // Scroll modal
             await page.evaluate(() => {
-                const modal = document.querySelector('.comet-v2-modal-body') || document.querySelector('.comet-modal-body');
-                if (modal) {
-                    modal.scrollTop = modal.scrollHeight;
-                }
+                const m = document.querySelector('.comet-v2-modal-body') || document.querySelector('.comet-modal-body');
+                if (m) m.scrollTop = m.scrollHeight;
             });
-
-            // Wait 2 seconds for content to load
-            await page.waitForTimeout(2000);
+            await page.waitForTimeout(1500);
         }
 
-        if (reviews.length > 0) {
-            await Dataset.pushData(reviews);
-        }
-
-        log.info(`Done. Total: ${saved}`);
+        if (reviews.length > 0) await Dataset.pushData(reviews);
+        log.info(`Complete: ${saved} reviews saved`);
     },
 
     failedRequestHandler({ request }, error) {
@@ -232,5 +170,5 @@ const crawler = new PlaywrightCrawler({
 });
 
 await crawler.run([{ url: product_url }]);
-log.info(`Complete. Reviews: ${saved}`);
+log.info(`Done. Total: ${saved}`);
 await Actor.exit();
