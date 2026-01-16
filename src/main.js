@@ -61,7 +61,7 @@ const crawler = new PlaywrightCrawler({
                 Object.defineProperty(navigator, 'webdriver', { get: () => false });
             });
         },
-    },
+    ],
     async requestHandler({ page }) {
         log.info('Loading...');
         await page.waitForLoadState('domcontentloaded');
@@ -103,7 +103,7 @@ const crawler = new PlaywrightCrawler({
             return false;
         });
 
-        if(clicked) {
+        if (clicked) {
             log.info('Button clicked. Waiting...');
             await page.waitForTimeout(3000);
         }
@@ -113,7 +113,7 @@ const crawler = new PlaywrightCrawler({
         let noChangeRounds = 0;
 
         // Main loop - wait for content to load by monitoring scrollHeight
-        for(let i = 0; i< 100 && saved < RESULTS_WANTED; i++) {
+        for (let i = 0; i < 100 && saved < RESULTS_WANTED; i++) {
             // Extract reviews
             const pageReviews = await page.evaluate(() => {
                 const items = [];
@@ -149,86 +149,86 @@ const crawler = new PlaywrightCrawler({
                 return items;
             });
 
-// Add unique
-for (const r of pageReviews) {
-    if (saved >= RESULTS_WANTED) break;
-    const key = r.text.substring(0, 80);
-    if (!seenTexts.has(key)) {
-        seenTexts.add(key);
-        reviews.push({
-            review_id: `${productId}_${saved + 1}`,
-            product_id: productId,
-            product_url,
-            reviewer_name: r.name,
-            rating: r.rating,
-            review_text: r.text,
-            review_date: r.date,
-            sku_info: r.sku,
-            images: r.images,
-            helpful_count: 0,
-            country: null,
-        });
-        saved++;
-    }
-}
+            // Add unique
+            for (const r of pageReviews) {
+                if (saved >= RESULTS_WANTED) break;
+                const key = r.text.substring(0, 80);
+                if (!seenTexts.has(key)) {
+                    seenTexts.add(key);
+                    reviews.push({
+                        review_id: `${productId}_${saved + 1}`,
+                        product_id: productId,
+                        product_url,
+                        reviewer_name: r.name,
+                        rating: r.rating,
+                        review_text: r.text,
+                        review_date: r.date,
+                        sku_info: r.sku,
+                        images: r.images,
+                        helpful_count: 0,
+                        country: null,
+                    });
+                    saved++;
+                }
+            }
 
-if (i % 5 === 0) {
-    log.info(`Round ${i + 1}: ${pageReviews.length} on page, ${saved}/${RESULTS_WANTED} saved`);
-}
+            if (i % 5 === 0) {
+                log.info(`Round ${i + 1}: ${pageReviews.length} on page, ${saved}/${RESULTS_WANTED} saved`);
+            }
 
-if (saved >= RESULTS_WANTED) break;
+            if (saved >= RESULTS_WANTED) break;
 
-// Check scrollHeight to see if content is loading
-const scrollInfo = await page.evaluate(() => {
-    const modal = document.querySelector('.comet-v2-modal-body') || document.querySelector('.comet-modal-body');
-    if (modal) {
-        return { height: modal.scrollHeight, found: true };
-    }
-    return { height: 0, found: false };
-});
+            // Check scrollHeight to see if content is loading
+            const scrollInfo = await page.evaluate(() => {
+                const modal = document.querySelector('.comet-v2-modal-body') || document.querySelector('.comet-modal-body');
+                if (modal) {
+                    return { height: modal.scrollHeight, found: true };
+                }
+                return { height: 0, found: false };
+            });
 
-if (scrollInfo.found) {
-    if (scrollInfo.height === lastHeight) {
-        noChangeRounds++;
-    } else {
-        noChangeRounds = 0;
-        lastHeight = scrollInfo.height;
-    }
-}
+            if (scrollInfo.found) {
+                if (scrollInfo.height === lastHeight) {
+                    noChangeRounds++;
+                } else {
+                    noChangeRounds = 0;
+                    lastHeight = scrollInfo.height;
+                }
+            }
 
-if (noChangeRounds >= 15) {
-    log.info('No scrollHeight change for 15 rounds. Done.');
-    break;
-}
+            if (noChangeRounds >= 15) {
+                log.info('No scrollHeight change for 15 rounds. Done.');
+                break;
+            }
 
-// Save batches
-if (reviews.length >= 10) {
-    await Dataset.pushData(reviews.splice(0, 10));
-    log.info('Batch saved.');
-}
+            // Save batches
+            if (reviews.length >= 10) {
+                await Dataset.pushData(reviews.splice(0, 10));
+                log.info('Batch saved.');
+            }
 
-// Scroll to bottom (like browser research)
-await page.evaluate(() => {
-    const modal = document.querySelector('.comet-v2-modal-body') || document.querySelector('.comet-modal-body');
-    if (modal) {
-        modal.scrollTop = modal.scrollHeight;
-    }
-});
+            // Scroll to bottom (like browser research)
+            await page.evaluate(() => {
+                const modal = document.querySelector('.comet-v2-modal-body') || document.querySelector('.comet-modal-body');
+                if (modal) {
+                    modal.scrollTop = modal.scrollHeight;
+                }
+            });
 
-// Wait 2 seconds for content to load
-await page.waitForTimeout(2000);
+            // Wait 2 seconds for content to load
+            await page.waitForTimeout(2000);
         }
 
-if (reviews.length > 0) {
-    await Dataset.pushData(reviews);
-}
+        if (reviews.length > 0) {
+            await Dataset.pushData(reviews);
+        }
 
-log.info(`Done. Total: ${saved}`);
+        log.info(`Done. Total: ${saved}`);
     },
 
-failedRequestHandler({ request }, error) {
-    log.error(`Failed: ${error.message}`);
-},
+    failedRequestHandler({ request }, error) {
+        log.error(`Failed: ${error.message}`);
+    },
 });
 
 await crawler.run([{ url: product_url }]);
