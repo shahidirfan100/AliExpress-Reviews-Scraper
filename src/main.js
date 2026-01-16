@@ -204,12 +204,33 @@ const crawler = new PlaywrightCrawler({
                         // Get SKU info
                         const skuEl = el.querySelector('.list--itemSku--idEQSGC, [class*="sku-info"], [class*="product-info"]');
 
-                        // Get images
+                        // Get images and clean URLs
                         const imgEls = el.querySelectorAll('.list--itemThumbnails--TtUDHhl img, [class*="review-image"] img, [class*="thumbnail"] img');
-                        const images = Array.from(imgEls).map(img => img.src || img.dataset?.src).filter(Boolean);
+                        const images = Array.from(imgEls)
+                            .map(img => img.src || img.dataset?.src)
+                            .filter(Boolean)
+                            .map(url => {
+                                // Remove _.avif suffix to keep clean jpg URL
+                                let cleanUrl = url.replace(/_\.avif$/i, '').replace(/_\.webp$/i, '');
+                                // Also remove size suffix like _220x220 if needed
+                                return cleanUrl;
+                            });
 
-                        // Get country if available
-                        const countryEl = el.querySelector('[class*="country"], [class*="flag"]');
+                        // Get country - try multiple methods
+                        let country = null;
+                        // Method 1: Look for country element
+                        const countryEl = el.querySelector('[class*="country"], [class*="flag"], [class*="location"]');
+                        if (countryEl) {
+                            country = countryEl.textContent?.trim() || countryEl.getAttribute('title') || null;
+                        }
+                        // Method 2: Parse from reviewer info (often contains country after name)
+                        if (!country && info) {
+                            // Look for country patterns in info text
+                            const countryMatch = info.match(/(?:from\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:\s+[A-Z][a-z]+)?)\s*$/i);
+                            if (countryMatch && countryMatch[1].length > 2 && !countryMatch[1].match(/^\d/)) {
+                                country = countryMatch[1];
+                            }
+                        }
 
                         // Generate unique ID from content hash
                         const reviewId = `${content.substring(0, 20).replace(/\W/g, '')}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
@@ -224,7 +245,7 @@ const crawler = new PlaywrightCrawler({
                                 sku_info: skuEl?.textContent?.trim() || null,
                                 images: images,
                                 helpful_count: 0,
-                                country: countryEl?.textContent?.trim() || null,
+                                country: country,
                             });
                         }
                     } catch (e) { /* skip failed review */ }
@@ -287,7 +308,11 @@ const crawler = new PlaywrightCrawler({
                         review_text: review.review_text,
                         review_date: review.review_date,
                         sku_info: review.sku_info,
-                        images: review.images.map(img => img.startsWith('//') ? `https:${img}` : img),
+                        images: review.images.map(img => {
+                            let url = img.startsWith('//') ? `https:${img}` : img;
+                            // Clean _.avif and _.webp suffixes
+                            return url.replace(/_\.avif$/i, '').replace(/_\.webp$/i, '');
+                        }),
                         helpful_count: review.helpful_count,
                         country: review.country,
                     });
