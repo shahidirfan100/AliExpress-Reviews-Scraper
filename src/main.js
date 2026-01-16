@@ -14,6 +14,7 @@ const {
 } = input;
 
 const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 20;
+const BATCH_SIZE = 10;
 
 // Extract product ID from URL
 const extractProductId = (url) => {
@@ -41,15 +42,15 @@ const seenIds = new Set();
 
 const crawler = new PlaywrightCrawler({
     proxyConfiguration,
-    maxRequestRetries: 5,
+    maxRequestRetries: 3,
     useSessionPool: true,
     sessionPoolOptions: {
-        maxPoolSize: 5,
+        maxPoolSize: 3,
         sessionOptions: { maxUsageCount: 3 },
     },
     maxConcurrency: 1,
-    requestHandlerTimeoutSecs: 300,
-    navigationTimeoutSecs: 90,
+    requestHandlerTimeoutSecs: 600,
+    navigationTimeoutSecs: 60,
     browserPoolOptions: {
         useFingerprints: true,
         fingerprintOptions: {
@@ -83,47 +84,20 @@ const crawler = new PlaywrightCrawler({
         log.info(`Processing: ${product_url}`);
 
         await page.waitForLoadState('domcontentloaded');
-        await page.waitForTimeout(3000);
-
-        // First scroll down to reviews section
-        log.info('Scrolling to reviews section...');
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight * 0.6));
         await page.waitForTimeout(2000);
 
-        // Try to click the "View more" / "See all reviews" button to open reviews modal
+        // Scroll to reviews section
+        log.info('Scrolling to reviews section...');
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight * 0.6));
+        await page.waitForTimeout(1500);
+
+        // Click "View more" button to open reviews modal
         log.info('Looking for reviews modal button...');
         const modalOpened = await page.evaluate(() => {
-            // Various selectors for the "View more" or "See all" button
-            const selectors = [
-                'button.v3--btn--KaygomA',
-                '[class*="review"] button',
-                '[class*="feedback"] button',
-                'button:has-text("View more")',
-                'button:has-text("See all")',
-                'a:has-text("View more")',
-                '[class*="more-review"]',
-            ];
-
-            for (const selector of selectors) {
-                try {
-                    const elements = document.querySelectorAll(selector);
-                    for (const el of elements) {
-                        if (el.textContent?.toLowerCase().includes('view') ||
-                            el.textContent?.toLowerCase().includes('see all') ||
-                            el.textContent?.toLowerCase().includes('more')) {
-                            el.scrollIntoView();
-                            el.click();
-                            return true;
-                        }
-                    }
-                } catch (e) { /* continue */ }
-            }
-
-            // Also try finding by text content directly
-            const allButtons = document.querySelectorAll('button, a, div[role="button"]');
+            const allButtons = document.querySelectorAll('button, a, div[role="button"], span[role="button"]');
             for (const btn of allButtons) {
                 const text = btn.textContent?.toLowerCase() || '';
-                if ((text.includes('view') && text.includes('more')) ||
+                if ((text.includes('view') && (text.includes('more') || text.includes('all'))) ||
                     (text.includes('see') && text.includes('all')) ||
                     (text.includes('all') && text.includes('review'))) {
                     btn.scrollIntoView();
@@ -136,21 +110,18 @@ const crawler = new PlaywrightCrawler({
 
         if (modalOpened) {
             log.info('Reviews modal button clicked, waiting for modal...');
-            await page.waitForTimeout(3000);
+            await page.waitForTimeout(2500);
         }
 
-        // Function to extract reviews from page/modal
+        // Function to extract reviews
         const extractReviews = async () => {
             return await page.evaluate(() => {
                 const reviews = [];
-
-                // Try multiple selectors for review items
                 const reviewSelectors = [
                     '.list--itemBox--je_KNzb',
                     '[class*="feedback-item"]',
                     '[class*="review-item"]',
                     '[class*="itemBox"]',
-                    '.buyer-review',
                 ];
 
                 let reviewElements = [];
@@ -164,80 +135,40 @@ const crawler = new PlaywrightCrawler({
 
                 for (const el of reviewElements) {
                     try {
-                        // Get reviewer info
-                        const infoEl = el.querySelector('.list--itemInfo--VEcgSFh, [class*="user-name"], [class*="user-info"], [class*="reviewer"]');
+                        const infoEl = el.querySelector('.list--itemInfo--VEcgSFh, [class*="user-name"], [class*="user-info"]');
                         const info = infoEl?.textContent?.trim() || '';
                         const infoParts = info.split('|').map(s => s.trim());
 
-                        // Get rating - count filled stars
-                        const starSelectors = [
-                            '.comet-icon-starreviewfilled',
-                            '[class*="star-view"] > span[class*="active"]',
-                            '[class*="star-icon"][class*="full"]',
-                            'svg[class*="star"][class*="filled"]',
-                        ];
+                        const starSelectors = ['.comet-icon-starreviewfilled', '[class*="star"][class*="full"]'];
                         let stars = 0;
                         for (const starSel of starSelectors) {
                             const starEls = el.querySelectorAll(starSel);
-                            if (starEls.length > 0) {
-                                stars = starEls.length;
-                                break;
-                            }
+                            if (starEls.length > 0) { stars = starEls.length; break; }
                         }
 
-                        // Get review content
-                        const contentSelectors = [
-                            '.list--itemReview--d9Z9Z5Z',
-                            '[class*="buyer-feedback"]',
-                            '[class*="review-content"]',
-                            '[class*="feedback-text"]',
-                        ];
+                        const contentSelectors = ['.list--itemReview--d9Z9Z5Z', '[class*="buyer-feedback"]', '[class*="review-content"]'];
                         let content = '';
                         for (const contentSel of contentSelectors) {
                             const contentEl = el.querySelector(contentSel);
-                            if (contentEl?.textContent?.trim()) {
-                                content = contentEl.textContent.trim();
-                                break;
-                            }
+                            if (contentEl?.textContent?.trim()) { content = contentEl.textContent.trim(); break; }
                         }
 
-                        // Get SKU info
-                        const skuEl = el.querySelector('.list--itemSku--idEQSGC, [class*="sku-info"], [class*="product-info"]');
-
-                        // Get images and clean URLs
+                        const skuEl = el.querySelector('.list--itemSku--idEQSGC, [class*="sku-info"]');
                         const imgEls = el.querySelectorAll('.list--itemThumbnails--TtUDHhl img, [class*="review-image"] img, [class*="thumbnail"] img');
                         const images = Array.from(imgEls)
                             .map(img => img.src || img.dataset?.src)
                             .filter(Boolean)
-                            .map(url => {
-                                // Remove _.avif suffix to keep clean jpg URL
-                                let cleanUrl = url.replace(/_\.avif$/i, '').replace(/_\.webp$/i, '');
-                                // Also remove size suffix like _220x220 if needed
-                                return cleanUrl;
-                            });
+                            .map(url => url.replace(/_\.avif$/i, '').replace(/_\.webp$/i, ''));
 
-                        // Get country - try multiple methods
                         let country = null;
-                        // Method 1: Look for country element
                         const countryEl = el.querySelector('[class*="country"], [class*="flag"], [class*="location"]');
                         if (countryEl) {
                             country = countryEl.textContent?.trim() || countryEl.getAttribute('title') || null;
                         }
-                        // Method 2: Parse from reviewer info (often contains country after name)
-                        if (!country && info) {
-                            // Look for country patterns in info text
-                            const countryMatch = info.match(/(?:from\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:\s+[A-Z][a-z]+)?)\s*$/i);
-                            if (countryMatch && countryMatch[1].length > 2 && !countryMatch[1].match(/^\d/)) {
-                                country = countryMatch[1];
-                            }
-                        }
-
-                        // Generate unique ID from content hash
-                        const reviewId = `${content.substring(0, 20).replace(/\W/g, '')}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
 
                         if (content) {
                             reviews.push({
-                                review_id: reviewId,
+                                review_id: `${content.substring(0, 30).replace(/\W/g, '')}_${Math.random().toString(36).substr(2, 6)}`,
                                 reviewer_name: infoParts[0] || 'Anonymous',
                                 rating: stars || 5,
                                 review_text: content,
@@ -248,55 +179,73 @@ const crawler = new PlaywrightCrawler({
                                 country: country,
                             });
                         }
-                    } catch (e) { /* skip failed review */ }
+                    } catch (e) { /* skip */ }
                 }
 
                 return reviews;
             });
         };
 
-        // Function to scroll within modal to load more reviews
-        const scrollModalForMore = async () => {
+        // Function to scroll within modal
+        const scrollModal = async () => {
             return await page.evaluate(() => {
-                // Find the modal/scrollable container
+                // Try to find and scroll the modal container
                 const modalSelectors = [
                     '.v3--modal-content--S7_r_eW',
                     '.comet-v2-modal-body',
                     '.comet-modal-body',
+                    '[class*="modal-body"]',
                     '[class*="modal-content"]',
                     '[class*="review-list"]',
                     '[class*="feedback-list"]',
+                    '[class*="dialog-body"]',
                 ];
 
                 for (const selector of modalSelectors) {
                     const modal = document.querySelector(selector);
-                    if (modal && modal.scrollHeight > modal.clientHeight) {
-                        const prevScrollTop = modal.scrollTop;
-                        modal.scrollTop += 500;
-                        return modal.scrollTop > prevScrollTop;
+                    if (modal) {
+                        const prevTop = modal.scrollTop;
+                        modal.scrollTop = modal.scrollTop + 800;
+                        if (modal.scrollTop > prevTop) {
+                            return { scrolled: true, selector };
+                        }
                     }
                 }
 
-                // If no modal, try scrolling main page
+                // Fallback: try scrolling any scrollable element inside a modal
+                const modalContainer = document.querySelector('[class*="modal"]');
+                if (modalContainer) {
+                    const scrollables = modalContainer.querySelectorAll('*');
+                    for (const el of scrollables) {
+                        if (el.scrollHeight > el.clientHeight + 50) {
+                            const prevTop = el.scrollTop;
+                            el.scrollTop = el.scrollTop + 800;
+                            if (el.scrollTop > prevTop) {
+                                return { scrolled: true, selector: 'fallback-scrollable' };
+                            }
+                        }
+                    }
+                }
+
+                // Last resort: scroll main page
                 const prevScroll = window.scrollY;
-                window.scrollBy(0, 500);
-                return window.scrollY > prevScroll;
+                window.scrollBy(0, 600);
+                return { scrolled: window.scrollY > prevScroll, selector: 'window' };
             });
         };
 
         // Collect reviews with pagination
         const allReviews = [];
         let previousCount = 0;
-        let noNewReviewsCount = 0;
-        const maxScrollAttempts = 50;
+        let noNewCount = 0;
+        const maxAttempts = 100;
 
-        for (let attempt = 0; attempt < maxScrollAttempts && saved < RESULTS_WANTED; attempt++) {
-            // Extract current reviews
+        for (let attempt = 0; attempt < maxAttempts && saved < RESULTS_WANTED; attempt++) {
             const currentReviews = await extractReviews();
 
-            // Add only new reviews
+            // Add new unique reviews
             for (const review of currentReviews) {
-                const contentKey = review.review_text.substring(0, 50);
+                const contentKey = review.review_text.substring(0, 60);
                 if (!seenIds.has(contentKey) && saved < RESULTS_WANTED) {
                     seenIds.add(contentKey);
                     allReviews.push({
@@ -310,7 +259,6 @@ const crawler = new PlaywrightCrawler({
                         sku_info: review.sku_info,
                         images: review.images.map(img => {
                             let url = img.startsWith('//') ? `https:${img}` : img;
-                            // Clean _.avif and _.webp suffixes
                             return url.replace(/_\.avif$/i, '').replace(/_\.webp$/i, '');
                         }),
                         helpful_count: review.helpful_count,
@@ -320,41 +268,47 @@ const crawler = new PlaywrightCrawler({
                 }
             }
 
-            log.info(`Attempt ${attempt + 1}: Found ${currentReviews.length} reviews on page. Total unique: ${saved}/${RESULTS_WANTED}`);
+            // Save in batches of 10
+            if (allReviews.length >= BATCH_SIZE) {
+                await Dataset.pushData(allReviews.splice(0, BATCH_SIZE));
+                log.info(`Batch saved. Total: ${saved}/${RESULTS_WANTED}`);
+            }
 
-            // Check if we've reached our goal
+            // Check progress
             if (saved >= RESULTS_WANTED) {
                 log.info('Reached desired number of reviews!');
                 break;
             }
 
-            // Check if we're getting new reviews
             if (saved === previousCount) {
-                noNewReviewsCount++;
-                if (noNewReviewsCount >= 5) {
-                    log.info('No new reviews found after multiple scroll attempts. All reviews collected.');
+                noNewCount++;
+                if (noNewCount >= 8) {
+                    log.info('No new reviews after multiple scrolls. All available reviews collected.');
                     break;
                 }
             } else {
-                noNewReviewsCount = 0;
+                noNewCount = 0;
+                log.info(`Progress: ${saved}/${RESULTS_WANTED} reviews collected`);
             }
             previousCount = saved;
 
             // Scroll to load more
-            const scrolled = await scrollModalForMore();
-            if (!scrolled) {
-                log.info('Cannot scroll further. Reached end of reviews.');
+            const scrollResult = await scrollModal();
+            if (!scrollResult.scrolled) {
+                log.info('Cannot scroll further.');
                 break;
             }
 
-            await page.waitForTimeout(1500);
+            await page.waitForTimeout(800); // Fast wait for content load
         }
 
-        // Save all collected reviews
+        // Save remaining reviews
         if (allReviews.length > 0) {
             await Dataset.pushData(allReviews);
-            log.info(`Saved ${allReviews.length} reviews to dataset.`);
-        } else {
+            log.info(`Final batch saved. Total: ${saved} reviews.`);
+        }
+
+        if (saved === 0) {
             log.warning('No reviews found for this product.');
         }
     },
