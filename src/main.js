@@ -73,22 +73,32 @@ const crawler = new PlaywrightCrawler({
 
         const reviews = [];
         let lastHeight = 0;
+        let lastSavedCount = 0;
         let stableRounds = 0;
 
-        // Extract and scroll loop
-        for (let round = 0; round < 80 && saved < RESULTS_WANTED; round++) {
-            // Extract
+        // Extract and scroll loop - pure infinite scroll, no pagination buttons needed
+        for (let round = 0; round < 150 && saved < RESULTS_WANTED; round++) {
+            // Extract reviews using resilient selector
             const found = await page.evaluate(() => {
                 const items = [];
-                document.querySelectorAll('.list--itemBox--je_KNzb').forEach(box => {
-                    const textEl = box.querySelector('.list--itemReview--d9Z9Z5Z');
+                // Use partial attribute selector - resilient to class suffix changes
+                const boxes = document.querySelectorAll('div[class^="list--itemBox"]');
+
+                boxes.forEach(box => {
+                    // Try multiple selectors for review text
+                    const textEl = box.querySelector('.list--itemReview--d9Z9Z5Z') ||
+                        box.querySelector('[class*="review-content"]') ||
+                        box.querySelector('[class*="reviewContent"]') ||
+                        box.querySelector('[class*="feedback-content"]');
                     const text = textEl?.textContent?.trim();
                     if (!text || text.length < 10) return;
 
-                    const infoEl = box.querySelector('.list--itemInfo--VEcgSFh');
+                    const infoEl = box.querySelector('.list--itemInfo--VEcgSFh') ||
+                        box.querySelector('[class*="user-info"]') ||
+                        box.querySelector('[class*="reviewer"]');
                     const parts = (infoEl?.textContent || '').split('|').map(s => s.trim());
-                    const stars = box.querySelectorAll('.comet-icon-starreviewfilled').length;
-                    const skuEl = box.querySelector('.list--itemSku--idEQSGC');
+                    const stars = box.querySelectorAll('.comet-icon-starreviewfilled, [class*="star-filled"], [class*="starFilled"]').length;
+                    const skuEl = box.querySelector('.list--itemSku--idEQSGC') || box.querySelector('[class*="sku"]');
                     const imgs = [...box.querySelectorAll('img')].map(i => i.src).filter(s => s?.includes('alicdn'));
 
                     items.push({
@@ -97,7 +107,7 @@ const crawler = new PlaywrightCrawler({
                         date: parts[1] || null,
                         rating: stars || 5,
                         sku: skuEl?.textContent?.trim() || null,
-                        images: imgs.map(u => u.replace(/_\.avif$/i, '').replace(/_\.webp$/i, '')),
+                        images: imgs.map(u => u.replace(/_.avif$/i, '').replace(/_.webp$/i, '')),
                     });
                 });
                 return items;
@@ -129,21 +139,24 @@ const crawler = new PlaywrightCrawler({
             if (round % 5 === 0) log.info(`Round ${round}: ${found.length} visible, ${saved}/${RESULTS_WANTED} saved`);
             if (saved >= RESULTS_WANTED) break;
 
-            // Check scroll height
+            // Check if we're making progress (either height changed OR we saved new reviews)
             const height = await page.evaluate(() => {
                 const m = document.querySelector('.comet-v2-modal-body') || document.querySelector('.comet-modal-body');
                 return m ? m.scrollHeight : 0;
             });
 
-            if (height === lastHeight) {
+            const madeProgress = (height !== lastHeight) || (saved > lastSavedCount);
+
+            if (!madeProgress) {
                 stableRounds++;
-                if (stableRounds >= 12) {
-                    log.info('No new content. Done.');
+                if (stableRounds >= 20) {
+                    log.info(`No new content after ${stableRounds} rounds. Done.`);
                     break;
                 }
             } else {
                 stableRounds = 0;
                 lastHeight = height;
+                lastSavedCount = saved;
             }
 
             // Save batch
@@ -152,12 +165,15 @@ const crawler = new PlaywrightCrawler({
                 log.info('Batch saved.');
             }
 
-            // Scroll modal
+            // Scroll to BOTTOM of modal to trigger infinite scroll (loads ~20-23 reviews per scroll)
             await page.evaluate(() => {
                 const m = document.querySelector('.comet-v2-modal-body') || document.querySelector('.comet-modal-body');
-                if (m) m.scrollTop = m.scrollHeight;
+                if (m) {
+                    m.scrollTop = m.scrollHeight;
+                }
             });
-            await page.waitForTimeout(1500);
+            // Wait longer for new reviews to load after scrolling to bottom
+            await page.waitForTimeout(2000);
         }
 
         if (reviews.length > 0) await Dataset.pushData(reviews);
