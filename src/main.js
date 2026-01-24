@@ -92,6 +92,12 @@ const fetchReviewPage = async (page, pageNumber) => {
             if (!response.ok()) throw new Error(`HTTP ${response.status()}`);
             const json = await response.json();
             if (!json?.data) throw new Error('Missing data in response');
+            const list = json.data.evaViewList ?? [];
+            if (!list.length && attempt < MAX_ATTEMPTS) {
+                // API occasionally returns empty payloads; wait and retry to let lazy-loading complete.
+                await Actor.sleep(1500);
+                continue;
+            }
             return json.data;
         } catch (error) {
             const isLastAttempt = attempt === MAX_ATTEMPTS;
@@ -126,6 +132,15 @@ const crawler = new PlaywrightCrawler({
     async requestHandler({ page, request }) {
         log.info(`Loaded ${request.url}. Warming up session...`);
         await page.waitForTimeout(2000);
+        try {
+            await page.waitForLoadState('networkidle', { timeout: 8000 });
+        } catch {
+            // ignore
+        }
+        await page.evaluate(() => {
+            document.querySelector('#nav-review')?.scrollIntoView();
+        });
+        await page.waitForTimeout(1000);
 
         let saved = 0;
         let pageNumber = 1;
@@ -140,8 +155,10 @@ const crawler = new PlaywrightCrawler({
 
             const reviews = data.evaViewList ?? [];
             if (!reviews.length) {
-                log.warning(`No reviews returned on page ${pageNumber}. Stopping early.`);
-                break;
+                log.warning(`No reviews returned on page ${pageNumber}. Waiting for lazy load and retrying next page.`);
+                await Actor.sleep(1500);
+                pageNumber++;
+                continue;
             }
 
             const batch = [];
@@ -159,8 +176,7 @@ const crawler = new PlaywrightCrawler({
                 await Dataset.pushData(batch);
                 log.info(`Saved ${batch.length} reviews from page ${pageNumber}. Total ${saved}/${RESULTS_WANTED}.`);
             } else {
-                log.warning(`Only duplicates found on page ${pageNumber}. Ending to avoid loops.`);
-                break;
+                log.warning(`Only duplicates found on page ${pageNumber}. Continuing to next page.`);
             }
 
             if (totalPages && pageNumber >= totalPages) {
