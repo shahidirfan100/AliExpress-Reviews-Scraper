@@ -6,7 +6,8 @@ const DEFAULT_PROXY_CONFIG = {
     useApifyProxy: true,
     apifyProxyGroups: ['RESIDENTIAL'],
 };
-const PAGE_SIZE = 20;
+// Smaller page size is more reliable for returning full review text on AliExpress.
+const PAGE_SIZE = 5;
 const MAX_ATTEMPTS = 3;
 
 const FILTER_MAP = {
@@ -80,6 +81,7 @@ const fetchReviewPage = async (page, pageNumber) => {
                     sort: sortCode,
                     filter: filterCode,
                     lang: 'en_US',
+                    translate: 'y',
                 },
                 headers: {
                     accept: 'application/json,text/plain,*/*',
@@ -108,21 +110,30 @@ const fetchReviewPage = async (page, pageNumber) => {
     }
 };
 
-const mapReview = (review) => ({
-    review_id: review.evaluationIdStr || String(review.evaluationId) || `${productId}-${review.evalDate}`,
-    product_id: productId,
-    product_url,
-    reviewer_name: review.buyerName || 'Anonymous',
-    rating: normalizeRating(review.buyerEval),
-    review_text: (review.buyerTranslationFeedback || review.buyerFeedback || '').trim() || null,
-    review_date: review.evalDate || null,
-    sku_info: review.skuInfo || null,
-    images: sanitizeImages(review.images || review.imageList || []),
-    helpful_count: review.upVoteCount ?? 0,
-    country: review.buyerCountry || null,
-    review_type: review.reviewType || null,
-    translated: Boolean(review.buyerTranslationFeedback && review.buyerTranslationFeedback !== review.buyerFeedback),
-});
+const mapReview = (review) => {
+    const text =
+        review.buyerTranslationFeedback ||
+        review.buyerFeedback ||
+        review.buyerProductFeedBack ||
+        review.buyerProductFeedback ||
+        '';
+
+    return {
+        review_id: review.evaluationIdStr || String(review.evaluationId) || `${productId}-${review.evalDate}`,
+        product_id: productId,
+        product_url,
+        reviewer_name: review.buyerName || 'Anonymous',
+        rating: normalizeRating(review.buyerEval),
+        review_text: text?.trim() || null,
+        review_date: review.evalDate || null,
+        sku_info: review.skuInfo || null,
+        images: sanitizeImages(review.images || review.imageList || []),
+        helpful_count: review.upVoteCount ?? 0,
+        country: review.buyerCountry || null,
+        review_type: review.reviewType || null,
+        translated: Boolean(review.buyerTranslationFeedback && review.buyerTranslationFeedback !== review.buyerFeedback),
+    };
+};
 
 const crawler = new PlaywrightCrawler({
     proxyConfiguration,
